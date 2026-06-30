@@ -20,9 +20,15 @@
 LLM_FPGA/
   README.md
   Qwen2.5-0.5B-Instruct_FPGA推理实现路线.md
+  Qwen2.5-0.5B_FPGA模块拆分与验证指南.md
   qwen25_0p5b_instruct_full_generation_trace/
   qwen25_0p5b_python_reference/
 ```
+
+关键文档：
+
+- `Qwen2.5-0.5B-Instruct_FPGA推理实现路线.md`：从工程角度规划 FPGA 推理 demo 的阶段路线。
+- `Qwen2.5-0.5B_FPGA模块拆分与验证指南.md`：逐模块说明 Python 代码、FPGA 实现任务和 `.npy` golden 验证方法。
 
 ### Golden Trace 数据目录
 
@@ -252,9 +258,15 @@ The current goal is not to build a production inference server. The goal is a co
 LLM_FPGA/
   README.md
   Qwen2.5-0.5B-Instruct_FPGA推理实现路线.md
+  Qwen2.5-0.5B_FPGA模块拆分与验证指南.md
   qwen25_0p5b_instruct_full_generation_trace/
   qwen25_0p5b_python_reference/
 ```
+
+Key documents:
+
+- `Qwen2.5-0.5B-Instruct_FPGA推理实现路线.md`: engineering roadmap for the FPGA inference demo.
+- `Qwen2.5-0.5B_FPGA模块拆分与验证指南.md`: module-by-module mapping from Python code to FPGA tasks and `.npy` golden verification.
 
 ### Golden Trace Directory
 
