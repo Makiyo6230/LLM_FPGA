@@ -50,7 +50,7 @@ LLM_FPGA/
 
 ## 1. 模型参数
 
-本项目当前 demo 使用 `Qwen/Qwen2.5-0.5B-Instruct`，不是 7B。模型结构是 Qwen2 架构，核心特点是 RoPE、RMSNorm、SwiGLU MLP、GQA attention、QKV bias、tie word embeddings。
+本项目当前 demo 使用 `Qwen/Qwen2.5-0.5B-Instruct`。模型结构是 Qwen2 架构，核心特点是 RoPE、RMSNorm、SwiGLU MLP、GQA attention、QKV bias、tie word embeddings。
 
 ```text
 模型: Qwen2.5-0.5B-Instruct
@@ -197,6 +197,56 @@ layer = layer_00_transformer_block
 
 把第 0 层的模块打通后，再扩展到 24 层和 decode。
 
+## 3.1 CPU/FPGA 分工与 golden 对应总表
+
+`00_prefill_full_prompt` 的数据可以和本文档模块对应，但不是所有模块都必须在 FPGA 上实现。这里先把分工说清楚：
+
+```text
+CPU host 必须负责:
+  文本 prompt、chat template、tokenizer、attention_mask/position_ids 准备、调度 prefill/decode。
+
+FPGA 第一阶段建议负责:
+  从 embedding 后的 hidden states 开始，完成 24 层 Transformer block、final RMSNorm、必要时 lm_head。
+
+FPGA 完整部署可继续负责:
+  token embedding lookup、lm_head + argmax、KV cache 管理。
+
+不建议 FPGA 负责:
+  tokenizer 和 chat template。它们是字符串/BPE 处理，放 CPU 更自然。
+```
+
+模块和数据对应关系：
+
+| 文档模块                            | 主要实现位置                   | 是否建议 FPGA 实现 | `00_prefill_full_prompt` 可用验证数据                                                                                                                                                         |
+| ----------------------------------- | ------------------------------ | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 模块 0 Tokenizer 与输入准备         | CPU host                       | 不建议             | 输入在顶层`metadata.json` 的 `prompt/messages/chat_text`；输出是 `model_input_token_ids.npy`、`position_ids.npy`                                                                        |
+| 模块 1 Token Embedding              | CPU 或 FPGA                    | 可选               | `model_input_token_ids.npy` -> `token_embedding_output.npy`                                                                                                                                 |
+| 模块 2 Transformer Block 输入/输出  | FPGA 调度边界                  | 需要               | `layer_XX_transformer_block/transformer_block_input.npy` -> `transformer_block_output.npy`                                                                                                  |
+| 模块 3 Attention 前 RMSNorm         | FPGA                           | 需要               | `attention_rmsnorm_input.npy` -> `attention_rmsnorm_output.npy`                                                                                                                             |
+| 模块 4 Q/K/V Linear                 | FPGA                           | 需要               | `attention_input_after_rmsnorm.npy` -> `attention_q_projection.npy` / `attention_k_projection.npy` / `attention_v_projection.npy`                                                       |
+| 模块 5 Reshape Head 与 RoPE         | FPGA，cos/sin 可由 CPU 预先给  | 需要               | `attention_q_before_rope.npy` / `attention_k_before_rope.npy` + `attention_rope_cos.npy` / `attention_rope_sin.npy` -> `attention_q_after_rope.npy` / `attention_k_after_rope.npy`  |
+| 模块 6 KV Cache Update              | FPGA 或 runtime cache manager  | 需要               | `attention_k_after_rope.npy` / `attention_value_states.npy` -> `attention_k_cache_after_update.npy` / `attention_v_cache_after_update.npy`                                              |
+| 模块 7 GQA Repeat                   | FPGA 内部地址映射或显式 repeat | 需要               | `attention_k_cache_after_update.npy` / `attention_v_cache_after_update.npy` -> `attention_k_repeated_for_gqa.npy` / `attention_v_repeated_for_gqa.npy`                                  |
+| 模块 8 QK/Mask/Softmax              | FPGA                           | 需要               | `attention_q_after_rope.npy` + `attention_k_repeated_for_gqa.npy` -> `attention_qk_scores_before_mask.npy` -> `attention_qk_scores_after_mask.npy` -> `attention_softmax_weights.npy` |
+| 模块 9 Attention weighted V         | FPGA                           | 需要               | `attention_softmax_weights.npy` + `attention_v_repeated_for_gqa.npy` -> `attention_weighted_value_sum.npy` / `attention_context_before_output_projection.npy`                           |
+| 模块 10 Attention output projection | FPGA                           | 需要               | `attention_output_projection_input.npy` -> `attention_output_projection.npy`                                                                                                                |
+| 模块 11 Attention residual add      | FPGA                           | 需要               | `transformer_block_input.npy` + `attention_module_output.npy` -> `attention_residual_add_output.npy`                                                                                      |
+| 模块 12 MLP 前 RMSNorm              | FPGA                           | 需要               | `mlp_rmsnorm_input.npy` -> `mlp_rmsnorm_output.npy`                                                                                                                                         |
+| 模块 13 SwiGLU MLP                  | FPGA                           | 需要               | `mlp_input_after_rmsnorm.npy` -> `mlp_gate_projection.npy` / `mlp_up_projection.npy` -> `mlp_silu_gate_activation.npy` -> `mlp_silu_gate_times_up.npy` -> `mlp_down_projection.npy` |
+| 模块 14 MLP residual add            | FPGA                           | 需要               | `attention_residual_add_output.npy` + `mlp_module_output.npy` -> `transformer_block_output.npy`                                                                                           |
+| 模块 15 Final RMSNorm               | FPGA                           | 需要               | `final_rmsnorm_input.npy` -> `final_rmsnorm_output.npy`                                                                                                                                     |
+| 模块 16 LM Head 与 argmax           | FPGA 或 CPU 分阶段实现         | 可选到需要         | `lm_head_input.npy` -> `lm_head_vocab_logits.npy`；token 选择可对比 `metadata.json` 的 `generated_ids`                                                                                  |
+
+注意：
+
+```text
+1. .npy trace 主要保存 activation 中间量，不保存全部权重。
+2. Linear / Embedding / lm_head / RMSNorm 验证时还需要模型权重。
+3. Tokenizer 的输入是文本，所以在 metadata.json，不是 .npy。
+4. 早期 FPGA demo 可以从 token_embedding_output.npy 开始，先跳过 tokenizer 和 embedding。
+5. 如果只验证单模块，可以直接用该模块输入 .npy 作为 FPGA 输入，用对应输出 .npy 做 golden。
+```
+
 ## 4. Python 源码到 Qwen2 模块路径
 
 HuggingFace 模型调用路径：
@@ -262,22 +312,31 @@ snapshots/modeling_qwen2_fpga_instrumented.py
 
 这部分通常不放到 FPGA 上实现，保留在 CPU host。
 
+实现位置：
+
+```text
+CPU 必须实现。
+FPGA 不建议实现。
+```
+
 ```text
 Python 代码:
   manual_prefill_decode.py line 83
   tokenizer.apply_chat_template(...)
 
 输入:
-  messages
+  metadata.json 中的 prompt / messages / chat_text
 
 输出:
   input_ids
   attention_mask
+  position_ids
 ```
 
 Golden 数据：
 
 ```text
+qwen25_0p5b_instruct_full_generation_trace/metadata.json
 00_prefill_full_prompt/model_input_token_ids.npy
 00_prefill_full_prompt/position_ids.npy
 ```
@@ -298,6 +357,7 @@ FPGA:
 1. input_ids 必须和 metadata.json 里的 input_ids 完全一致。
 2. prefill position_ids 通常是 [0, 1, ..., 35]。
 3. decode position_ids 要等于当前 cache 已有长度。
+4. 这个模块验证的是 CPU tokenizer 结果，不是 FPGA 计算结果。
 ```
 
 ## 6. 模块 1：Token Embedding
@@ -346,6 +406,18 @@ FPGA 实现建议：
 1. 如果 embedding 放 FPGA：实现 BRAM/HBM 查表，按 token id 取 896 个 fp16。
 2. 如果 embedding 放 CPU：CPU 直接把 token_embedding_output 送到 FPGA。
 3. 早期 demo 建议先把 embedding 作为 FPGA 输入，减少权重搬运复杂度。
+```
+
+推荐分阶段：
+
+```text
+第一阶段:
+  CPU 读取/计算 token_embedding_output.npy，把它作为 FPGA 的第一份输入。
+  FPGA 从 layer_00_transformer_block/transformer_block_input.npy 开始验证。
+
+第二阶段:
+  FPGA 接收 model_input_token_ids.npy，并实现 embedding lookup。
+  输出对比 token_embedding_output.npy。
 ```
 
 验证方法：
@@ -532,6 +604,18 @@ FPGA 实现建议：
 2. cos/sin 可由 CPU 预计算后传入，也可由 FPGA 查表。
 3. 早期验证建议直接读取 golden cos/sin，先保证旋转公式正确。
 4. 注意 q 的 head 数是 14，k/v 的 head 数是 2。
+```
+
+推荐分阶段：
+
+```text
+第一阶段:
+  CPU 或测试脚本直接提供 attention_rope_cos.npy / attention_rope_sin.npy。
+  FPGA 只实现 q/k 的旋转公式。
+
+第二阶段:
+  FPGA 根据 position_ids 生成或查表 cos/sin。
+  再对比 attention_rope_cos.npy / attention_rope_sin.npy。
 ```
 
 验证方法：
@@ -1050,6 +1134,21 @@ FPGA 实现建议：
 4. 如果 embedding 和 lm_head 权重绑定，需要注意权重布局复用。
 ```
 
+推荐分阶段：
+
+```text
+第一阶段:
+  FPGA 不实现 lm_head，只输出 final_rmsnorm_output.npy 对齐。
+  CPU/Python 用 lm_head 权重算 logits 和 argmax。
+
+第二阶段:
+  FPGA 实现 lm_head 分块矩阵乘，输出 lm_head_vocab_logits.npy。
+
+第三阶段:
+  FPGA 只返回 argmax token id。
+  用 metadata.json 的 generated_ids 验证 token 是否一致。
+```
+
 验证方法：
 
 ```text
@@ -1059,6 +1158,19 @@ FPGA 实现建议：
 ```
 
 ## 22. 推荐 FPGA 实现顺序
+
+第一版不要从 tokenizer 开始，也不要先追求完整端到端。建议先把 CPU/FPGA 边界固定为：
+
+```text
+CPU:
+  prompt -> tokenizer -> model_input_token_ids.npy / position_ids.npy
+  可选: token embedding -> token_embedding_output.npy
+
+FPGA:
+  从 layer_00_transformer_block/transformer_block_input.npy 开始
+  逐模块输出自己的 *_fpga.npy
+  用同名 golden .npy 做比较
+```
 
 ```text
 阶段 A: 单算子验证
@@ -1110,6 +1222,9 @@ from pathlib import Path
 import numpy as np
 
 
+
+
+
 def compare_tensor(golden_path, fpga_path, rtol=1e-2, atol=1e-2):
     golden = np.load(golden_path)
     fpga = np.load(fpga_path)
@@ -1135,6 +1250,9 @@ def compare_tensor(golden_path, fpga_path, rtol=1e-2, atol=1e-2):
     print("cosine: ", cosine)
     print("allclose:", ok)
     return ok
+
+
+
 
 
 root = Path("qwen25_0p5b_instruct_full_generation_trace")
@@ -1209,4 +1327,4 @@ compare_tensor(
 
 ## 26. 一句话总结
 
-当前下一步不是继续收集数据，而是从 `RMSNorm -> Linear -> RoPE -> Attention -> MLP -> 单层 Block -> 24 层 Prefill -> Decode KV Cache` 逐级实现 FPGA 模块；每一级都直接读取本目录下的 `.npy` 作为输入和 golden 输出，保证模块级误差可定位、可复现、可回归。
+下一步是从 `RMSNorm -> Linear -> RoPE -> Attention -> MLP -> 单层 Block -> 24 层 Prefill -> Decode KV Cache` 逐级实现 FPGA 模块；每一级都直接读取本目录下的 `.npy` 作为输入和 golden 输出，保证模块级误差可定位、可复现、可回归。
