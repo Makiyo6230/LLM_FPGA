@@ -21,14 +21,17 @@ LLM_FPGA/
   README.md
   Qwen2.5-0.5B-Instruct_FPGA推理实现路线.md
   Qwen2.5-0.5B_FPGA模块拆分与验证指南.md
+  Qwen2.5-0.5B-Instruct模型结构.md
   qwen25_0p5b_instruct_full_generation_trace/
   qwen25_0p5b_python_reference/
+  tools/
 ```
 
 关键文档：
 
 - `Qwen2.5-0.5B-Instruct_FPGA推理实现路线.md`：从工程角度规划 FPGA 推理 demo 的阶段路线。
 - `Qwen2.5-0.5B_FPGA模块拆分与验证指南.md`：逐模块说明 Python 代码、FPGA 实现任务和 `.npy` golden 验证方法。
+- `Qwen2.5-0.5B-Instruct模型结构.md`：记录实际模型 config、完整权重 tensor 名称、shape 和 tied lm_head 说明。
 
 ### Golden Trace 数据目录
 
@@ -83,6 +86,23 @@ position = RoPE
 mlp = SwiGLU
 ```
 
+实际模型权重结构：
+
+```text
+weight dtype = BF16
+weight tensors = 290
+weight file = model.safetensors
+tie_word_embeddings = True
+lm_head.weight 逻辑上存在，实际复用 model.embed_tokens.weight
+```
+
+目标迁移模型地址：
+
+```text
+Qwen2.5-7B-Instruct ModelScope:
+https://www.modelscope.cn/models/Qwen/Qwen2.5-7B-Instruct
+```
+
 ### Python 推理参考代码
 
 ```text
@@ -103,6 +123,29 @@ qwen25_0p5b_python_reference/
 - `qwen2_module_reference.py`：模块级 PyTorch 参考实现，包括 RMSNorm、Linear、RoPE、GQA repeat、Attention、SwiGLU MLP、lm_head。
 - `snapshots/modeling_qwen2_fpga_instrumented.py`：插桩后的 Qwen2 模型源码快照。
 - `snapshots/fpga_recorder.py`：负责保存 `.npy` 中间量的 recorder。
+
+### 辅助工具
+
+```text
+tools/
+  read_npy.py
+  inspect_qwen_model.py
+```
+
+- `tools/read_npy.py`：通用 `.npy` 查看脚本，可打印 shape、dtype、统计值和样本值，用于快速确认 golden tensor 内容。
+- `tools/inspect_qwen_model.py`：本地 Qwen/Qwen2.5 模型结构查看脚本，可读取 `config.json` 和 `.safetensors` 文件头，打印模型配置、逻辑模块结构、权重 tensor 名称和 shape。
+
+查看本地模型结构示例：
+
+```powershell
+python tools\inspect_qwen_model.py "C:\path\to\Qwen2.5-0.5B-Instruct" --max-weights 80
+```
+
+只看第 0 层权重：
+
+```powershell
+python tools\inspect_qwen_model.py "C:\path\to\Qwen2.5-0.5B-Instruct" --filter "model.layers.0"
+```
 
 ### 在 H200 上复现推理
 
@@ -259,14 +302,17 @@ LLM_FPGA/
   README.md
   Qwen2.5-0.5B-Instruct_FPGA推理实现路线.md
   Qwen2.5-0.5B_FPGA模块拆分与验证指南.md
+  Qwen2.5-0.5B-Instruct模型结构.md
   qwen25_0p5b_instruct_full_generation_trace/
   qwen25_0p5b_python_reference/
+  tools/
 ```
 
 Key documents:
 
 - `Qwen2.5-0.5B-Instruct_FPGA推理实现路线.md`: engineering roadmap for the FPGA inference demo.
 - `Qwen2.5-0.5B_FPGA模块拆分与验证指南.md`: module-by-module mapping from Python code to FPGA tasks and `.npy` golden verification.
+- `Qwen2.5-0.5B-Instruct模型结构.md`: actual model config, complete weight tensor names, shapes, and tied lm_head notes.
 
 ### Golden Trace Directory
 
@@ -321,6 +367,23 @@ position = RoPE
 mlp = SwiGLU
 ```
 
+Actual weight structure:
+
+```text
+weight dtype = BF16
+weight tensors = 290
+weight file = model.safetensors
+tie_word_embeddings = True
+lm_head.weight is a logical name; the actual tensor reuses model.embed_tokens.weight
+```
+
+Target migration model:
+
+```text
+Qwen2.5-7B-Instruct ModelScope:
+https://www.modelscope.cn/models/Qwen/Qwen2.5-7B-Instruct
+```
+
 ### Python Inference Reference
 
 ```text
@@ -341,6 +404,29 @@ Important files:
 - `qwen2_module_reference.py`: small module-level PyTorch reference functions.
 - `snapshots/modeling_qwen2_fpga_instrumented.py`: instrumented Qwen2 model source.
 - `snapshots/fpga_recorder.py`: tensor recorder that writes `.npy` files.
+
+### Utilities
+
+```text
+tools/
+  read_npy.py
+  inspect_qwen_model.py
+```
+
+- `tools/read_npy.py`: generic `.npy` inspection script for printing shape, dtype, statistics, and sample values.
+- `tools/inspect_qwen_model.py`: local Qwen/Qwen2.5 model inspection script. It reads `config.json` and `.safetensors` headers to print model config, logical module structure, weight tensor names, and shapes.
+
+Inspect a local model:
+
+```powershell
+python tools\inspect_qwen_model.py "C:\path\to\Qwen2.5-0.5B-Instruct" --max-weights 80
+```
+
+List only layer 0 weights:
+
+```powershell
+python tools\inspect_qwen_model.py "C:\path\to\Qwen2.5-0.5B-Instruct" --filter "model.layers.0"
+```
 
 ### Reproducing the Python Inference on H200
 

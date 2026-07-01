@@ -66,8 +66,11 @@ GQA repeat G: A / K = 7
 head_dim D: 64
 
 RMSNorm eps: 1e-6
-trace 模型 dtype: float16
+实际权重 dtype: BF16
+当前 golden trace activation dtype: 多数为 float16
 generation logits 保存 dtype: float32
+tie_word_embeddings: True
+实际权重文件中没有单独的 lm_head.weight，lm_head 逻辑上复用 model.embed_tokens.weight
 ```
 
 常用张量大小：
@@ -219,7 +222,7 @@ FPGA 完整部署可继续负责:
 
 | 文档模块                            | 主要实现位置                   | 是否建议 FPGA 实现 | `00_prefill_full_prompt` 可用验证数据                                                                                                                                                         |
 | ----------------------------------- | ------------------------------ | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 模块 0 Tokenizer 与输入准备         | CPU host                       | 不建议             | 输入在顶层`metadata.json` 的 `prompt/messages/chat_text`；输出是 `model_input_token_ids.npy`、`position_ids.npy`                                                                        |
+| 模块 0 Tokenizer 与输入准备         | CPU host                       | 不建议             | 输入在顶层 `metadata.json` 的 `prompt/messages/chat_text`；输出是 `model_input_token_ids.npy`、`position_ids.npy`                                                                       |
 | 模块 1 Token Embedding              | CPU 或 FPGA                    | 可选               | `model_input_token_ids.npy` -> `token_embedding_output.npy`                                                                                                                                 |
 | 模块 2 Transformer Block 输入/输出  | FPGA 调度边界                  | 需要               | `layer_XX_transformer_block/transformer_block_input.npy` -> `transformer_block_output.npy`                                                                                                  |
 | 模块 3 Attention 前 RMSNorm         | FPGA                           | 需要               | `attention_rmsnorm_input.npy` -> `attention_rmsnorm_output.npy`                                                                                                                             |
@@ -1092,7 +1095,7 @@ final_rmsnorm_output.npy 应与 lm_head_input.npy 对齐。
 
 ```text
 功能:
-  logits = hidden @ lm_head.weight.T
+  logits = hidden @ lm_head_weight.T
   next_token = argmax(logits[-1])
 
 Python 源码:
@@ -1105,7 +1108,8 @@ Python 源码:
 
 输入:
   lm_head_input: [B, T, 896]
-  lm_head.weight: [151936, 896]
+  lm_head_weight: [151936, 896]
+  当前实际 tensor 名称: model.embed_tokens.weight
 
 输出:
   lm_head_vocab_logits: [B, T, 151936]
@@ -1131,7 +1135,8 @@ FPGA 实现建议：
 1. lm_head 是 896 -> 151936 的大矩阵乘，权重访存压力很高。
 2. 早期 demo 可以只输出 logits 后在 CPU 做 argmax。
 3. 真正部署时建议 FPGA 做分块矩阵乘和分块 argmax，只返回 token id。
-4. 如果 embedding 和 lm_head 权重绑定，需要注意权重布局复用。
+4. 当前模型 tie_word_embeddings=True，实际没有单独 lm_head.weight。
+5. lm_head 逻辑权重需要读取 model.embed_tokens.weight 并按输出投影方式复用。
 ```
 
 推荐分阶段：
@@ -1139,7 +1144,7 @@ FPGA 实现建议：
 ```text
 第一阶段:
   FPGA 不实现 lm_head，只输出 final_rmsnorm_output.npy 对齐。
-  CPU/Python 用 lm_head 权重算 logits 和 argmax。
+  CPU/Python 用 model.embed_tokens.weight 作为 lm_head 逻辑权重算 logits 和 argmax。
 
 第二阶段:
   FPGA 实现 lm_head 分块矩阵乘，输出 lm_head_vocab_logits.npy。

@@ -43,6 +43,18 @@ flightllm_test_demo
 - `generation_token_vocab_logits`：每一步生成 token 对应的 vocab logits。
 - `flightllm_test_demo`：FlightLLM FPGA LLM demo 参考工程。
 
+辅助文档与工具：
+
+```text
+Qwen2.5-0.5B_FPGA模块拆分与验证指南.md
+tools/read_npy.py
+Qwen2.5-0.5B-Instruct模型结构.md
+```
+
+- `Qwen2.5-0.5B_FPGA模块拆分与验证指南.md`：逐模块说明 CPU/FPGA 分工、代码位置和 `.npy` golden 验证点。
+- `tools/read_npy.py`：读取单个或目录下的 `.npy`，打印 shape、dtype、统计值和样本值。
+- `Qwen2.5-0.5B-Instruct模型结构.md`：记录实际模型 config、290 个权重 tensor 名称/shape，以及 tied lm_head 说明。
+
 服务器原始环境：
 
 ```text
@@ -215,10 +227,24 @@ lm_head_vocab_logits.npy
 
 目标：写一个独立工具，读取 FPGA 输出和 golden `.npy` 做误差比较。
 
-建议工具：
+已具备工具：
 
 ```text
-compare_tensor.py
+tools/read_npy.py
+```
+
+用途：
+
+```text
+1. 读取单个 .npy 文件。
+2. 扫描一个目录下的 .npy 文件。
+3. 打印 shape、dtype、min/max/mean/std 和少量样本值。
+```
+
+还需要补充的对比工具：
+
+```text
+tools/compare_tensor.py
 ```
 
 基础指标：
@@ -325,7 +351,16 @@ embedding weight
 q_proj/k_proj/v_proj/o_proj weight 和 bias
 mlp gate/up/down weight
 final RMSNorm weight
-lm_head weight
+lm_head 逻辑权重
+```
+
+实际结构注意：
+
+```text
+tie_word_embeddings = True
+model.safetensors 中没有单独的 lm_head.weight
+lm_head 逻辑上使用 model.embed_tokens.weight
+当前 0.5B 模型权重 dtype = BF16，权重 tensor 数 = 290
 ```
 
 量化路线建议：
@@ -365,4 +400,3 @@ lm_head weight
 4. `00_prefill_full_prompt` 是完整 prompt 输入，不是单 token decode。
 5. `01_decode_token_01` 之后每步只输入一个 token，但 attention 中会使用历史 KV cache。
 6. 后续新增 case 时，应复用当前目录命名体系。
-
